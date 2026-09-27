@@ -490,11 +490,35 @@ class TinyREMITokenizer:
             event_idx += 1
         
         processed_notes = self._process_glissandos(raw_decoded_notes)
+        processed_notes = self.resolve_same_key(processed_notes)
         final_notes_with_velocity = self._assign_velocity(processed_notes, volume_contour)
         
         final_notes_with_velocity.sort(key=lambda x: (x["onset"], x["pitch"]))
         return final_notes_with_velocity
     
+    @staticmethod
+    def resolve_same_key(notes: list) -> list:
+        """A sounding note ends where its key is struck again; one key struck twice at one onset
+        becomes one note (the non-grace one, or the longer). The decoder gives every note its full
+        Duration token, so without this the output re-strikes keys it is still holding. The
+        extractor already applies this rule to its own notes ("shorter" offsets)."""
+        by_pitch = defaultdict(list)
+        for note in notes:
+            by_pitch[int(note["pitch"])].append(note)
+        kept = []
+        for group in by_pitch.values():
+            group.sort(key=lambda n: (n["onset"], bool(n.get("is_grace_note")), -n["offset"]))
+            prev = None
+            for note in group:
+                if prev is not None and abs(note["onset"] - prev["onset"]) < 1e-6:
+                    prev["offset"] = max(prev["offset"], note["offset"])
+                    continue
+                if prev is not None and note["onset"] < prev["offset"]:
+                    prev["offset"] = note["onset"]
+                kept.append(note)
+                prev = note
+        return kept
+
     @staticmethod
     def note_to_midi(note_list: list, output_path: Union[str, Path]):
         """
