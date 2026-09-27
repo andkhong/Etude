@@ -1,6 +1,7 @@
 # infer.py
 
 import sys
+import json
 import shutil
 import argparse
 import subprocess
@@ -203,6 +204,8 @@ class InferencePipeline:
             final_notes = tokenizer.decode_to_notes(
                 events=generated_events, volume_map_path=self.work_dir / "volume.json"
             )
+            with open(self.work_dir / "extract.json", "r") as f:
+                final_notes = guard_clashes(final_notes, json.load(f))
             final_midi_path = self.output_dir / f"{final_filename}.mid"
             tokenizer.note_to_midi(final_notes, final_midi_path)
             logger.info(f"Final MIDI saved to: {final_midi_path.resolve()}")
@@ -237,6 +240,54 @@ class InferencePipeline:
         # The decode stage runs in both cases
         self._run_stage3_decode(target_attributes, final_filename)
         logger.success("Inference pipeline finished successfully!")
+
+
+def guard_clashes(notes, extract_notes, onset_sec=0.03, min_pitch=60, support_sec=0.15):
+    """Drop a decoded note that forms a 1-2 semitone second with another struck with it (both at or
+    above `min_pitch`) when exactly one of the two pitches is in the transcription the decoder was
+    conditioned on (that pitch sounding, or starting within `support_sec`). Both or neither
+    supported: left alone. Grace notes are never touched."""
+    import bisect
+
+    by_pitch = {}
+    for n in extract_notes:
+        by_pitch.setdefault(int(n["pitch"]), []).append((float(n["onset"]), float(n["offset"])))
+    starts = {}
+    for pitch, spans in by_pitch.items():
+        spans.sort()
+        starts[pitch] = [a for a, _ in spans]
+
+    def supported(pitch, t):
+        spans = by_pitch.get(pitch)
+        if not spans:
+            return False
+        arr = starts[pitch]
+        i = bisect.bisect_left(arr, t - support_sec)
+        if i < len(arr) and arr[i] <= t + support_sec:
+            return True
+        j = bisect.bisect_right(arr, t) - 1
+        return j >= 0 and spans[j][1] > t
+
+    ordered = sorted(range(len(notes)), key=lambda k: notes[k]["onset"])
+    drop = set()
+    for pos, i in enumerate(ordered):
+        a = notes[i]
+        if a.get("is_grace_note") or int(a["pitch"]) < min_pitch:
+            continue
+        for j in ordered[pos + 1:]:
+            b = notes[j]
+            if b["onset"] - a["onset"] > onset_sec:
+                break
+            if b.get("is_grace_note") or int(b["pitch"]) < min_pitch:
+                continue
+            if not 1 <= abs(int(a["pitch"]) - int(b["pitch"])) <= 2:
+                continue
+            sa, sb = supported(int(a["pitch"]), a["onset"]), supported(int(b["pitch"]), b["onset"])
+            if sa and not sb:
+                drop.add(j)
+            elif sb and not sa:
+                drop.add(i)
+    return [n for k, n in enumerate(notes) if k not in drop]
 
 
 def main():

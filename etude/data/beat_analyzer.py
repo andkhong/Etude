@@ -56,6 +56,7 @@ class BeatAnalyzer:
         processed_regions = []
         for start_idx, end_idx, _ in stable_regions_indices:
             region_measures = measures[start_idx : end_idx + 1]
+            region_time_sig = self._region_time_sig(region_measures, global_time_sig)
             downbeats = [m['start'] for m in region_measures]
             if end_idx + 1 < len(measures):
                 downbeats.append(measures[end_idx + 1]['start'])
@@ -64,14 +65,14 @@ class BeatAnalyzer:
 
             if durations:
                 avg_duration = sum(durations) / len(durations)
-                avg_bpm = (60 * global_time_sig) / avg_duration if avg_duration > 0 else 0
+                avg_bpm = (60 * region_time_sig) / avg_duration if avg_duration > 0 else 0
                 
                 processed_regions.append({
                     "start_time": downbeats[0],
                     "downbeats": downbeats[:-1],
                     "avg_duration": avg_duration,
                     "bpm": avg_bpm,
-                    "time_sig": global_time_sig,
+                    "time_sig": region_time_sig,
                 })
         
         if not processed_regions:
@@ -134,6 +135,29 @@ class BeatAnalyzer:
                 'uniform': is_uniform
             })
         return measures
+
+    @staticmethod
+    def _region_time_sig(region_measures: List[Dict], global_time_sig: int) -> int:
+        """The beat count this region's own bars show, when it disagrees with the global meter.
+
+        The tokenizer divides each bar (the span between two downbeats) into `time_sig` beats. If a
+        region's downbeats are, say, 4 beats apart while the global meter says 2, every Pos and
+        Duration token is resolved against a beat the song does not have (its sixteenth grid
+        becomes the song's eighths). Uses the mode of the region's uniform bars when at least 60 %
+        of them agree and it is a supported count; otherwise the global meter.
+        """
+        counts = [m["raw_beats"] for m in region_measures if m.get("uniform", True)]
+        if len(counts) < 2:
+            return global_time_sig
+        try:
+            observed = mode(counts)
+        except StatisticsError:
+            return global_time_sig
+        if observed == global_time_sig or observed not in (2, 3, 4, 6):
+            return global_time_sig
+        if counts.count(observed) < 0.6 * len(counts):
+            return global_time_sig
+        return int(observed)
 
     def _compute_global_time_sig(self, measures: List[Dict]) -> int:
         """Determines the most likely global time signature (beats per measure)."""
